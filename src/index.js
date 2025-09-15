@@ -26,6 +26,7 @@ if (!fs.existsSync(outputDir)) {
 
 // Main function
 async function main() {
+
   // Check if URL is provided
   if (process.argv.length < 3) {
     console.error('Please provide a Udemy course URL as a parameter');
@@ -73,25 +74,10 @@ async function main() {
   });
 
   try {
-    const page = await browser.newPage();
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Navigate to login page
-    console.log('Navigating to login page...');
-    let loginPageLoaded = false;
-    for (let attempt = 0; attempt < 2 && !loginPageLoaded; attempt++) {
-      try {
-        await page.goto('https://www.udemy.com/join/passwordless-auth', { waitUntil: 'domcontentloaded' });
-        loginPageLoaded = true;
-      } catch (err) {
-        if (err.message.includes('frame was detached')) {
-          console.warn('Frame was detached, retrying navigation...');
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        } else {
-          throw err;
-        }
-      }
-    }
+   
+    const COOKIE_FILE_NAME = 'udemy_cookies.json';
+    const COOKIE_FILE_PATH = path.join(__dirname, COOKIE_FILE_NAME);
+    const COOKIE_EXPIRATION_DAYS = 7; // Cookies will be considered valid for 7 days
 
     // Check if email is configured
     if (!process.env.UDEMY_EMAIL) {
@@ -99,53 +85,136 @@ async function main() {
       process.exit(1);
     }
 
-    console.log('Processing login...');
+    const page = await browser.newPage();
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Wait a few seconds before filling the email input
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    let loggedIn = false;
 
-    // Fill in the email input
-    await page.waitForSelector('input[name="email"]');
-    await page.type('input[name="email"]', process.env.UDEMY_EMAIL, { delay: 100 });
+    // --- Cookie Loading Attempt ---
+    if (fs.existsSync(COOKIE_FILE_PATH)) {
+      console.log('Attempting to load saved cookies...');
+      try {
+        const cookieDataString = fs.readFileSync(COOKIE_FILE_PATH, 'utf8');
+        const savedCookies = JSON.parse(cookieDataString);
 
-    // Close the cookie bar if it exists
-    try {
-      // Check if cookie bar exists
-      const cookieButtonExists = await page.evaluate(() => {
-        return !!document.getElementById('onetrust-accept-btn-handler');
-      });
+        // Calculate cookie expiration time
+        const expirationTime = savedCookies.timestamp + (COOKIE_EXPIRATION_DAYS * 24 * 60 * 60 * 1000);
 
-      if (cookieButtonExists) {
-        await page.$eval('#onetrust-accept-btn-handler', element => element.click());
-        console.log('Closed cookie bar');
+        if (Date.now() < expirationTime) {
+          await page.setCookie(...savedCookies.data);
+          console.log('Cookies loaded. Verifying login status by navigating to the course page...');
+          // Navigate directly to the course URL to check if cookies provide login
+          await page.goto(courseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+          // Check if login was successful by examining the URL.
+          // If we are not on a login/join page and we are on a udemy.com course page, we assume success.
+          const currentUrl = page.url();
+          if (!currentUrl.includes('join/passwordless-auth') && !currentUrl.includes('udemy.com/join') && currentUrl.includes('udemy.com/course')) {
+            loggedIn = true;
+            console.log('Successfully logged in using saved cookies!');
+          } else {
+            console.log('Saved cookies did not lead to a successful login or expired. Proceeding with full login.');
+            // Invalidate potentially bad or insufficient cookies
+            fs.unlinkSync(COOKIE_FILE_PATH);
+          }
+        } else {
+          console.log('Saved cookies have expired. Proceeding with full login.');
+          // Delete expired cookies file
+          fs.unlinkSync(COOKIE_FILE_PATH);
+        }
+      } catch (error) {
+        console.error('Error loading or parsing cookies:', error.message);
+        console.log('Proceeding with full login.');
+        // If the cookie file is corrupted, delete it
+        if (fs.existsSync(COOKIE_FILE_PATH)) {
+          fs.unlinkSync(COOKIE_FILE_PATH);
+        }
       }
-    } catch (error) {
-      console.log('Cookie bar not found or could not be closed');
     }
 
-    // Submit the login form
-    await page.$eval('[data-purpose="code-generation-form"] [type="submit"]', element => element.click());
-    console.log('Email submitted, waiting for verification code...');
+    if (!loggedIn) {
+      console.log('Full login process required.');
+      // Navigate to login page
+      console.log('Navigating to login page...');
+      let loginPageLoaded = false;
+      for (let attempt = 0; attempt < 2 && !loginPageLoaded; attempt++) {
+        try {
+          await page.goto('https://www.udemy.com/join/passwordless-auth', { waitUntil: 'domcontentloaded' });
+          loginPageLoaded = true;
+        } catch (err) {
+          if (err.message.includes('frame was detached')) {
+            console.warn('Frame was detached, retrying navigation...');
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } else {
+            throw err;
+          }
+        }
+      }
 
-    // Ask user for verification code in terminal
-    console.log('You have 5 minutes to enter the verification code before the program times out.');
-    const verificationCode = await new Promise((resolve) => {
-      rl.question('Please enter the 6-digit verification code from your email: ', (code) => {
-        resolve(code.trim());
+      console.log('Processing login...');
+
+      // Wait a few seconds before filling the email input
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+      // Fill in the email input
+      await page.waitForSelector('input[name="email"]');
+      await page.type('input[name="email"]', process.env.UDEMY_EMAIL, { delay: 100 });
+
+      // Close the cookie bar if it exists
+      try {
+        // Check if cookie bar exists
+        const cookieButtonExists = await page.evaluate(() => {
+          return !!document.getElementById('onetrust-accept-btn-handler');
+        });
+
+        if (cookieButtonExists) {
+          await page.$eval('#onetrust-accept-btn-handler', element => element.click());
+          console.log('Closed cookie bar');
+        }
+      } catch (error) {
+        console.log('Cookie bar not found or could not be closed');
+      }
+
+      // Submit the login form
+      await page.$eval('[data-purpose="code-generation-form"] [type="submit"]', element => element.click());
+      console.log('Email submitted, waiting for verification code...');
+
+      // Ask user for verification code in terminal
+      console.log('You have 5 minutes to enter the verification code before the program times out.');
+      const verificationCode = await new Promise((resolve) => {
+        rl.question('Please enter the 6-digit verification code from your email: ', (code) => {
+          resolve(code.trim());
+        });
       });
-    });
 
-    // Fill in the verification code
-    await page.waitForSelector('[data-purpose="otp-text-area"] input', { timeout: 60000 });
-    await page.type('[data-purpose="otp-text-area"] input', verificationCode, { delay: 100 });
+      // Fill in the verification code
+      await page.waitForSelector('[data-purpose="otp-text-area"] input', { timeout: 60000 });
+      await page.type('[data-purpose="otp-text-area"] input', verificationCode, { delay: 100 });
 
-    // Submit the verification form
-    await page.$eval('[data-purpose="otp-verification-form"] [type="submit"]', element => element.click());
-    console.log('Verification submitted, completing login...');
+      // Submit the verification form
+      await page.$eval('[data-purpose="otp-verification-form"] [type="submit"]', element => element.click());
+      console.log('Verification submitted, completing login...');
 
-    // Wait for redirect after successful login with a longer timeout
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    console.log('Login successful!');
+      // Wait for redirect after successful login with a longer timeout
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    
+          // After a successful manual login, save cookies
+      console.log('Login successful! Saving cookies for future use...');
+      const currentCookies = await page.cookies();
+      const cookiesToSave = {
+        timestamp: Date.now(), // Save current timestamp
+        expiresInDays: COOKIE_EXPIRATION_DAYS, // For reference
+        data: currentCookies // The actual cookie array
+      };
+      fs.writeFileSync(COOKIE_FILE_PATH, JSON.stringify(cookiesToSave, null, 2), 'utf8');
+      loggedIn = true; // Mark as logged in
+
+
+  // Ensure we are logged in before proceeding
+      if (!loggedIn) {
+        throw new Error('Could not log in, neither with saved cookies nor with manual process.');
+      }
+    }
 
     // Navigate to course page
     console.log(`Navigating to course page: ${courseUrl}`);
@@ -204,6 +273,8 @@ async function main() {
     console.log('Processing course structure...');
     const courseStructure = processCourseStructure(courseJson.results);
 
+    console.log(courseJson.results);
+
     // Generate CONTENTS.txt
     console.log('Generating CONTENTS.txt...');
     generateContentsFile(courseStructure, outputDir);
@@ -221,6 +292,7 @@ async function main() {
     rl.close();
   }
 }
+
 
 // Process course structure
 function processCourseStructure(results) {
@@ -250,6 +322,35 @@ function processCourseStructure(results) {
       item._class === 'lecture' &&
       item.asset &&
       typeof item.asset.asset_type === 'string' &&
+      item.asset.asset_type.toLowerCase().includes('article')
+    ) {
+      //lectureCounter++
+      const lecture = {
+        id: item.id,
+        title: item.title,
+        created: item.created,
+        timeEstimation: item.asset.time_estimation,
+        chapterIndex: currentChapter ? currentChapter.index : null,
+        type : 'article',
+        lectureIndex: lectureCounter++
+      };
+
+      //if (item.asset.captions && Array.isArray(item.asset.captions)) {
+      //  lecture.captions = item.asset.captions.filter(c => c.url);
+      //}
+
+      if (currentChapter) {
+        currentChapter.lectures.push(lecture);
+      } else {
+        courseStructure.lectures.push(lecture);
+      }
+
+
+
+    } else if (
+      item._class === 'lecture' &&
+      item.asset &&
+      typeof item.asset.asset_type === 'string' &&
       item.asset.asset_type.toLowerCase().includes('video')
     ) {
       const lecture = {
@@ -258,6 +359,7 @@ function processCourseStructure(results) {
         created: item.created,
         timeEstimation: item.asset.time_estimation,
         chapterIndex: currentChapter ? currentChapter.index : null,
+        type : 'video',
         lectureIndex: lectureCounter++
       };
 
@@ -315,7 +417,7 @@ function generateContentsFile(courseStructure, outputDir) {
     for (const lecture of chapter.lectures) {
       const timeInMinutes = Math.floor(lecture.timeEstimation / 60);
       const date = new Date(lecture.created).toLocaleDateString();
-      content += `${chapter.index}.${lecture.lectureIndex} ${lecture.title} [${timeInMinutes} min, ${date}]\n`;
+      content += `${chapter.index}.${lecture.lectureIndex} ${lecture.title} [${lecture.type}, ${timeInMinutes} min, ${date}]\n`;
     }
 
     content += '\n';
@@ -326,7 +428,7 @@ function generateContentsFile(courseStructure, outputDir) {
     for (const lecture of courseStructure.lectures) {
       const timeInMinutes = Math.floor(lecture.timeEstimation / 60);
       const date = new Date(lecture.created).toLocaleDateString();
-      content += `${lecture.lectureIndex}. ${lecture.title} [${timeInMinutes} min, ${date}]\n`;
+      content += `${lecture.lectureIndex}. ${lecture.title} [${lecture.type}, ${timeInMinutes} min, ${date}]\n`;
     }
   }
 
@@ -341,11 +443,16 @@ async function downloadTranscripts(browser, courseUrl, courseStructure, download
   // Flatten all lectures into a single list
   for (const chapter of courseStructure.chapters) {
     for (const lecture of chapter.lectures) {
-      allLectures.push({ lecture, chapter });
+      if (lecture.type === 'video') {
+        allLectures.push({ lecture, chapter });
+      }
     }
   }
   for (const lecture of courseStructure.lectures) {
-    allLectures.push({ lecture, chapter: null });
+     if (lecture.type === 'video') {
+        allLectures.push({ lecture, chapter: null });
+      }
+    //allLectures.push({ lecture, chapter: null });
   }
 
   // Split into chunks
